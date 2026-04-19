@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Note Marker</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #1a1a2e; color: #eee; height: 100vh; display: flex; flex-direction: column; }
+  #toolbar { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: #16213e; border-bottom: 1px solid #0f3460; flex-shrink: 0; flex-wrap: wrap; }
+  #toolbar h1 { font-size: 18px; font-weight: 600; margin-right: auto; }
+  #toolbar h1 span { color: #e94560; }
+  .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
+  .btn-primary { background: #e94560; color: #fff; }
+  .btn-primary:hover { background: #c81e45; }
+  .btn-icon { background: #0f3460; color: #fff; padding: 8px 12px; }
+  .btn-icon:hover { background: #1a4a8a; }
+  .btn-icon:disabled { opacity: 0.4; cursor: default; }
+  .btn-toggle { background: #0f3460; color: #fff; padding: 8px 14px; }
+  .btn-toggle.active { background: #e94560; }
+  .btn-bass.active { background: #e94560; }
+  .btn-treble.active { background: #4a90d9; }
+  .toolbar-sep { width: 1px; height: 24px; background: #0f3460; }
+  #page-info { font-size: 14px; color: #aaa; min-width: 80px; text-align: center; }
+  #drop-zone { flex: 1; display: flex; align-items: center; justify-content: center; border: 3px dashed #0f3460; border-radius: 16px; margin: 40px; transition: all 0.3s; cursor: pointer; }
+  #drop-zone.drag-over { border-color: #e94560; background: rgba(233,69,96,0.05); }
+  #drop-zone .hint { text-align: center; }
+  #drop-zone .hint .icon { font-size: 64px; margin-bottom: 16px; }
+  #drop-zone .hint p { font-size: 18px; color: #888; }
+  #drop-zone .hint small { font-size: 13px; color: #555; }
+  #viewer-wrap { flex: 1; overflow: auto; display: none; justify-content: center; align-items: center; padding: 10px 20px; background: #2a2a3e; position: relative; gap: 20px; flex-wrap: nowrap; }
+  #viewer-wrap.seamless { flex-direction: column; align-items: center; flex-wrap: wrap; }
+  .page-container { position: relative; display: inline-block; }
+  .page-container canvas { display: block; border-radius: 2px; }
+  #viewer-wrap.seamless .page-container { margin-bottom: 12px; }
+  #viewer-wrap.seamless .page-container canvas { max-height: none; }
+  .highlight-layer { position: absolute; top: 0; left: 0; }
+  .highlight-layer .highlight-rect { pointer-events: none; }
+  .highlight-layer .highlight-rect .delete-btn,
+  .highlight-layer .highlight-rect .refresh-btn { pointer-events: auto; }
+  #viewer-wrap.mark-mode .highlight-layer .highlight-rect { pointer-events: auto; }
+  .highlight-layer .highlight-rect.detected { pointer-events: auto; }
+  .highlight-rect { position: absolute; border-radius: 2px; }
+  .highlight-rect.bass { background: rgba(233,69,96,0.2); border: 2px solid rgba(233,69,96,0.7); }
+  .highlight-rect.treble { background: rgba(74,144,217,0.2); border: 2px solid rgba(74,144,217,0.7); }
+  .highlight-rect:hover { filter: brightness(1.3); }
+  .highlight-rect.detected { background: rgba(80,200,80,0.15) !important; border: 2px solid rgba(80,200,80,0.7) !important; }
+  .highlight-rect .delete-btn { position: absolute; top: -10px; right: -10px; width: 20px; height: 20px; color: #fff; border-radius: 50%; font-size: 12px; line-height: 20px; text-align: center; cursor: pointer; display: none; pointer-events: auto; }
+  .highlight-rect .refresh-btn { position: absolute; bottom: -10px; right: -10px; width: 20px; height: 20px; color: #fff; border-radius: 50%; font-size: 11px; line-height: 20px; text-align: center; cursor: pointer; display: none; pointer-events: auto; z-index: 10; }
+  .highlight-rect.bass .delete-btn, .highlight-rect.bass .refresh-btn { background: #e94560; }
+  .highlight-rect.treble .delete-btn, .highlight-rect.treble .refresh-btn { background: #4a90d9; }
+  .highlight-rect:hover .delete-btn, .highlight-rect:hover .refresh-btn { display: block; }
+  .drawing-rect { position: absolute; border: 2px dashed rgba(255,180,0,0.8); background: rgba(255,200,50,0.15); pointer-events: none; border-radius: 2px; }
+  #viewer-wrap.mark-mode { cursor: crosshair; touch-action: none; }
+  #viewer-wrap.mark-mode .highlight-layer { pointer-events: auto; cursor: crosshair; }
+  #viewer-wrap.correct-mode { cursor: pointer; }
+  #loading { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; }
+  #loading .spinner { width: 40px; height: 40px; border: 4px solid #0f3460; border-top-color: #e94560; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #mark-tip { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(22,33,62,0.95); color: #eee; padding: 10px 20px; border-radius: 8px; font-size: 13px; display: none; z-index: 50; border: 1px solid #0f3460; }
+  .mode-switch { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #aaa; }
+  .mode-switch select { background: #0f3460; color: #fff; border: 1px solid #1a4a8a; border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+  .switch-track { position: relative; width: 40px; height: 22px; background: #0f3460; border-radius: 11px; cursor: pointer; transition: background 0.2s; }
+  .switch-track.active { background: #e94560; }
+  .switch-track .switch-thumb { position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; background: #fff; border-radius: 50%; transition: left 0.2s; }
+  .switch-track.active .switch-thumb { left: 20px; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <h1><span>Note</span> Marker</h1>
+  <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">打开文件</button>
+  <input type="file" id="file-input" accept=".pdf" hidden>
+  <span id="page-info">— / —</span>
+  <div class="toolbar-sep"></div>
+  <div class="mode-switch">
+    <span id="mode-label">固定调</span>
+    <div class="switch-track" id="do-switch"><div class="switch-thumb"></div></div>
+    <span id="mode-label-r">首调</span>
+    <select id="key-select" style="display:none" title="选择调性">
+      <option value="1">C</option><option value="2">D</option><option value="3">E</option><option value="4">F</option><option value="5">G</option><option value="6">A</option><option value="7">B</option>
+    </select>
+  </div>
+  <button class="btn btn-toggle btn-bass" id="btn-bass">🎵 低音谱标记</button>
+  <button class="btn btn-toggle btn-treble" id="btn-treble">🎶 高音谱标记</button>
+  <button class="btn btn-toggle" id="btn-calibrate" title="基线校准：框选一段纯净的五线谱区域">📏 基线校准</button>
+  <button class="btn btn-toggle" id="btn-correct" style="display:none" title="清除单个标记：点击音符清除">✏️ 清除单个标记</button>
+  <button class="btn btn-icon" id="btn-clear-marks" style="display:none" title="清除所有标注">🗑️</button>
+  <button class="btn btn-icon" id="btn-debug" style="display:none" title="调试模式">🔍 调试</button>
+  <button class="btn btn-icon" id="btn-export" style="display:none" title="导出标注后的PDF">📤 导出PDF</button>
+</div>
+<div id="drop-zone"><div class="hint"><div class="icon">📄</div><p>拖拽 PDF 文件到这里</p><small>或点击上方「打开文件」按钮</small></div></div>
+<div id="viewer-wrap"></div>
+<div id="mark-tip">拖拽矩形框选标注区域 · 按 Esc 退出标注模式</div>
+<div id="loading"><div class="spinner"></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script>
+<script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script type="module">
+const pdfjsLib = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs');
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+
+const SERVER = window.location.origin;
+let originalPdfArrayBuffer = null;
+let pdfDoc = null;
+let markMode = null; // null | 'bass' | 'treble'
+let correctMode = false;
+let calibrateMode = false;
+let calibration = JSON.parse(localStorage.getItem('calibration') || 'null'); // { staffSpace, lineGap, clef }
+let doMode = localStorage.getItem('doMode') || 'fixed'; // 'fixed' | 'movable'
+let doKey = parseInt(localStorage.getItem('doKey')) || 1; // 1=C, 2=D, ...
+const dpr = window.devicePixelRatio || 1;
+// Highlights: { pageNum: [{ x, y, w, h, clef: 'bass'|'treble' }] }
+const highlights = {};
+const noteCache = {};
+const pageImageData = {};
+
+const $ = id => document.getElementById(id);
+const fileInput=$('file-input'), dropZone=$('drop-zone'), wrap=$('viewer-wrap');
+const pageInfo=$('page-info'), loading=$('loading');
+const btnBass=$('btn-bass'), btnTreble=$('btn-treble'), btnClear=$('btn-clear-marks');
+const btnDebug=$('btn-debug'), btnExport=$('btn-export'), btnCorrect=$('btn-correct'), btnCalibrate=$('btn-calibrate'), markTip=$('mark-tip');
+const doSwitch=$('do-switch'), keySelect=$('key-select'), modeLabel=$('mode-label');
+
+function show(v) { dropZone.style.display=v?'none':'flex'; wrap.style.display=v?'flex':'none'; }
+function updateModeUI() {
+  wrap.classList.add('seamless');
+  if (pdfDoc) pageInfo.textContent = `共 ${pdfDoc.numPages} 页`;
+}
+function updateMarkUI() {
+  btnBass.classList.toggle('active', markMode === 'bass');
+  btnTreble.classList.toggle('active', markMode === 'treble');
+  btnCorrect.classList.toggle('active', correctMode);
+  btnCalibrate.classList.toggle('active', calibrateMode);
+  wrap.classList.toggle('mark-mode', !!markMode || calibrateMode);
+  wrap.classList.toggle('correct-mode', correctMode);
+  wrap.style.cursor = correctMode ? 'pointer' : calibrateMode ? 'crosshair' : '';
+  markTip.style.display = markMode || calibrateMode ? 'block' : 'none';
+  if (markMode) {
+    markTip.textContent = markMode === 'bass'
+      ? '低音谱标记：拖拽框选区域 · 再次点击模式按钮退出'
+      : '高音谱标记：拖拽框选区域 · 再次点击模式按钮退出';
+  } else if (calibrateMode) {
+    markTip.textContent = '基线校准：框选一段只有五线谱的区域（不含音符）· 再次点击按钮退出';
+  }
+  const has = Object.keys(highlights).some(k => highlights[k].length);
+  btnClear.style.display = has ? 'inline-block' : 'none';
+  btnDebug.style.display = has ? 'inline-block' : 'none';
+  btnExport.style.display = has ? 'inline-block' : 'none';
+  const hasNotes = Object.keys(noteCache).some(k => noteCache[k]?.length);
+  btnCorrect.style.display = has || hasNotes ? 'inline-block' : 'none';
+}
+function getSeamlessFitScale(vp) { return (innerWidth-40)/vp.width; }
+function fitCanvasSize(vpWidth, vpHeight, maxW, maxH) {
+  maxW = maxW || (innerWidth - 60);
+  maxH = maxH || (innerHeight - 80);
+  let cssW = vpWidth / dpr, cssH = vpHeight / dpr;
+  if (cssW > maxW) { cssH *= maxW / cssW; cssW = maxW; }
+  if (cssH > maxH) { cssW *= maxH / cssH; cssH = maxH; }
+  return [Math.round(cssW), Math.round(cssH)];
+}
+
+function drawNotesOnCanvas(canvas, notes) {
+  const ctx = canvas.getContext('2d');
+  const fontSize = Math.round(33 * dpr);
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'right';
+  for (const n of notes) {
+    const half = n.size / 2;
+    const isBass = n.clef === 'bass';
+    ctx.strokeStyle = isBass ? 'rgba(233,69,96,0.85)' : 'rgba(74,144,217,0.85)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(n.cx - half, n.cy - half, n.size, n.size);
+    if (n.pitch) {
+      ctx.fillStyle = isBass ? 'rgba(233,69,96,0.95)' : 'rgba(74,144,217,0.95)';
+      ctx.fillText(n.pitch, n.cx - half - 6, n.cy);
+    }
+  }
+}
+
+function restoreCanvas(canvas) {
+  const pg = parseInt(canvas.dataset.page);
+  const orig = pageImageData[pg];
+  if (orig) canvas.getContext('2d').putImageData(orig, 0, 0);
+}
+
+function drawHighlights(container, pageNum, canvasEl) {
+  let layer = container.querySelector('.highlight-layer');
+  if (!layer) { layer = document.createElement('div'); layer.className = 'highlight-layer'; container.appendChild(layer); }
+  layer.innerHTML = '';
+  const cw = canvasEl.offsetWidth, ch = canvasEl.offsetHeight;
+  layer.style.width = cw + 'px';
+  layer.style.height = ch + 'px';
+  (highlights[pageNum]||[]).forEach((m, idx) => {
+    const r = document.createElement('div');
+    r.className = 'highlight-rect ' + (m.clef || 'bass') + (m.detected ? ' detected' : '');
+    r.style.left = (m.x * cw) + 'px';
+    r.style.top = (m.y * ch) + 'px';
+    r.style.width = (m.w * cw) + 'px';
+    r.style.height = (m.h * ch) + 'px';
+    // Refresh button
+    const ref = document.createElement('div');
+    ref.className = 'refresh-btn';
+    ref.textContent = '↻';
+    ref.addEventListener('click', ev => {
+      ev.stopPropagation();
+      detectSingleRegion(container, pageNum, idx, canvasEl);
+    });
+    r.appendChild(ref);
+    const del = document.createElement('div');
+    del.className = 'delete-btn';
+    del.textContent = '✕';
+    del.addEventListener('click', ev => {
+      ev.stopPropagation();
+      highlights[pageNum].splice(idx, 1);
+      if (!highlights[pageNum].length) delete highlights[pageNum];
+      // Only clear notes that belong to the deleted region
+      if (noteCache[pageNum]) {
+        const removed = m;
+        noteCache[pageNum] = noteCache[pageNum].filter(n => {
+          const nx = n.cx / parseFloat(canvasEl.dataset.origW || canvasEl.width);
+          const ny = n.cy / parseFloat(canvasEl.dataset.origH || canvasEl.height);
+          return !(nx >= removed.x && nx <= removed.x + removed.w && ny >= removed.y && ny <= removed.y + removed.h);
+        });
+      }
+      restoreCanvas(canvasEl);
+      drawHighlights(container, pageNum, canvasEl);
+      if (noteCache[pageNum]?.length) drawNotesOnCanvas(canvasEl, noteCache[pageNum]);
+      updateMarkUI();
+    });
+    r.appendChild(del);
+    layer.appendChild(r);
+  });
+}
+
+async function detectSingleRegion(container, pg, markIdx, canvasEl) {
+  if (!pdfDoc) return;
+  const mark = highlights[pg][markIdx];
+  if (!mark) return;
+  restoreCanvas(canvasEl);
+  // Remove old notes for this region
+  if (noteCache[pg]) {
+    noteCache[pg] = noteCache[pg].filter(n => {
+      const nx = n.cx / canvasEl.width;
+      const ny = n.cy / canvasEl.height;
+      return !(nx >= mark.x && nx <= mark.x + mark.w && ny >= mark.y && ny <= mark.y + mark.h);
+    });
+  }
+  const dataUrl = canvasEl.toDataURL('image/png');
+  const imageB64 = dataUrl.split(',')[1];
+  try {
+    const resp = await fetch(SERVER + '/detect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: imageB64, regions: [{ ...mark, doMode: doMode, doKey: doMode === 'movable' ? doKey : 1 }], calibration: calibration })
+    });
+    const data = await resp.json();
+    const newNotes = (data.notes || []).map(n => ({...n, regionIdx: markIdx}));
+    if (!noteCache[pg]) noteCache[pg] = [];
+    noteCache[pg].push(...newNotes);
+  } catch (e) { console.error('Detection failed:', e); }
+  mark.detected = true;
+  if (noteCache[pg]?.length) drawNotesOnCanvas(canvasEl, noteCache[pg]);
+  drawHighlights(container, pg, canvasEl);
+  updateMarkUI();
+}
+
+async function calibrateRegion(pg, mark, canvasEl) {
+  if (!pdfDoc) return;
+  const dataUrl = canvasEl.toDataURL('image/png');
+  const imageB64 = dataUrl.split(',')[1];
+  try {
+    const resp = await fetch(SERVER + '/calibrate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: imageB64, region: mark })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      calibration = { staffSpace: data.staff_space, lineGap: data.line_gap };
+      localStorage.setItem('calibration', JSON.stringify(calibration));
+      calibrateMode = false;
+      updateMarkUI();
+      alert('校准成功！五线谱间距: ' + data.line_gap.toFixed(1) + 'px');
+    } else {
+      alert('校准失败: ' + (data.error || '未检测到五线谱'));
+    }
+  } catch (e) { console.error('Calibration failed:', e); alert('校准失败: ' + e.message); }
+}
+
+async function detectAllNotes() {
+  if (!pdfDoc) return;
+  const containers = wrap.querySelectorAll('.page-container');
+  for (const container of containers) {
+    const canvas = container.querySelector('canvas');
+    if (!canvas) continue;
+    const pg = parseInt(canvas.dataset.page);
+    const marks = highlights[pg] || [];
+    if (!marks.length) { noteCache[pg] = []; continue; }
+    // Only submit marks that haven't been detected yet
+    const undetected = marks.filter(m => !m.detected);
+    if (!undetected.length) continue;
+    restoreCanvas(canvas);
+    // Remove old notes only for undetected regions
+    if (noteCache[pg]) {
+      for (const m of undetected) {
+        noteCache[pg] = noteCache[pg].filter(n => {
+          const nx = n.cx / canvas.width;
+          const ny = n.cy / canvas.height;
+          return !(nx >= m.x && nx <= m.x + m.w && ny >= m.y && ny <= m.y + m.h);
+        });
+      }
+    }
+    const dataUrl = canvas.toDataURL('image/png');
+    const imageB64 = dataUrl.split(',')[1];
+    try {
+      const resp = await fetch(SERVER + '/detect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageB64, regions: undetected.map(m => ({ ...m, doMode: doMode, doKey: doMode === 'movable' ? doKey : 1 })), calibration: calibration })
+      });
+      const data = await resp.json();
+      if (!noteCache[pg]) noteCache[pg] = [];
+      noteCache[pg].push(...(data.notes || []));
+    } catch (e) { console.error('Detection failed:', e); }
+    // Mark all undetected as detected
+    for (const m of marks) { if (!m.detected) m.detected = true; }
+    if (noteCache[pg]?.length) drawNotesOnCanvas(canvas, noteCache[pg]);
+    drawHighlights(container, pg, canvas);
+  }
+}
+
+async function renderSeamless() {
+  if (!pdfDoc) return;
+  loading.style.display = 'flex'; wrap.innerHTML = '';
+  const fp = await pdfDoc.getPage(1), vp0 = fp.getViewport({scale:1});
+  const fs = getSeamlessFitScale(vp0), scale = fs;
+  for (let i=1; i<=pdfDoc.numPages; i++) {
+    const page = await pdfDoc.getPage(i);
+    const viewport = page.getViewport({ scale: scale*dpr });
+    const [cssW, cssH] = fitCanvasSize(viewport.width, viewport.height);
+    const container = document.createElement('div'); container.className = 'page-container';
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    canvas.style.width = cssW+'px'; canvas.style.height = cssH+'px';
+    canvas.dataset.page = i;
+    container.appendChild(canvas); wrap.appendChild(container);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    pageImageData[i] = ctx.getImageData(0,0,canvas.width,canvas.height);
+    drawHighlights(container, i, canvas);
+    if (noteCache[i]?.length) drawNotesOnCanvas(canvas, noteCache[i]);
+  }
+  loading.style.display = 'none';
+  pageInfo.textContent = `共 ${pdfDoc.numPages} 页`;
+}
+
+function render() { if (!pdfDoc) return; renderSeamless(); }
+
+async function loadPDF(data) {
+  pdfDoc = await pdfjsLib.getDocument(data).promise;
+  Object.keys(highlights).forEach(k=>delete highlights[k]);
+  Object.keys(noteCache).forEach(k=>delete noteCache[k]);
+  Object.keys(pageImageData).forEach(k=>delete pageImageData[k]);
+  show(true); updateModeUI(); await renderSeamless();
+}
+
+// ─── Do mode switch ───
+function initDoMode() {
+  doSwitch.classList.toggle('active', doMode === 'movable');
+  keySelect.style.display = doMode === 'movable' ? 'inline-block' : 'none';
+  keySelect.value = doKey;
+}
+initDoMode();
+doSwitch.addEventListener('click', () => {
+  doMode = doMode === 'fixed' ? 'movable' : 'fixed';
+  localStorage.setItem('doMode', doMode);
+  initDoMode();
+});
+keySelect.addEventListener('change', () => {
+  doKey = parseInt(keySelect.value);
+  localStorage.setItem('doKey', doKey);
+});
+
+btnBass.addEventListener('click', () => {
+  markMode = markMode === 'bass' ? null : 'bass';
+  if (markMode) { correctMode = false; calibrateMode = false; }
+  updateMarkUI();
+});
+btnTreble.addEventListener('click', () => {
+  markMode = markMode === 'treble' ? null : 'treble';
+  if (markMode) { correctMode = false; calibrateMode = false; }
+  updateMarkUI();
+});
+btnCalibrate.addEventListener('click', () => {
+  calibrateMode = !calibrateMode;
+  if (calibrateMode) { markMode = null; correctMode = false; }
+  updateMarkUI();
+});
+btnClear.addEventListener('click', () => {
+  Object.keys(highlights).forEach(k=>delete highlights[k]);
+  Object.keys(noteCache).forEach(k=>delete noteCache[k]);
+  wrap.querySelectorAll('.page-container canvas').forEach(c => restoreCanvas(c));
+  wrap.querySelectorAll('.page-container').forEach(c => {
+    const canvas = c.querySelector('canvas');
+    if (canvas) drawHighlights(c, parseInt(canvas.dataset.page), canvas);
+  });
+  updateMarkUI();
+});
+btnDebug.addEventListener('click', async () => {
+  const containers = wrap.querySelectorAll('.page-container');
+  let canvas = null;
+  for (const c of containers) {
+    const cv = c.querySelector('canvas');
+    const pg = parseInt(cv?.dataset.page || 0);
+    if (cv && (highlights[pg]||[]).length) { canvas = cv; break; }
+  }
+  if (!canvas) canvas = wrap.querySelector('canvas');
+  if (!canvas) return;
+  const pg = parseInt(canvas.dataset.page);
+  const marks = highlights[pg] || [];
+  if (!marks.length) return;
+  restoreCanvas(canvas);
+  const imageB64 = canvas.toDataURL('image/png').split(',')[1];
+  try {
+    const resp = await fetch(SERVER+'/debug', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({image: imageB64, regions: marks.map(m => ({ ...m, doMode: doMode, doKey: doMode === 'movable' ? doKey : 1 })), calibration: calibration})
+    });
+    const blob = await resp.blob();
+    window.open(URL.createObjectURL(blob), '_blank');
+  } catch(e) { console.error(e); }
+});
+document.addEventListener('keydown', e => {
+  if (e.key==='Escape') {
+    if (markMode) { markMode=null; updateMarkUI(); }
+    if (correctMode) { correctMode=false; updateMarkUI(); }
+  }
+});
+
+// ─── Correct mode: click to remove individual note ───
+btnCorrect.addEventListener('click', () => { correctMode=!correctMode; if(correctMode){ markMode=null; calibrateMode=false; } updateMarkUI(); });
+wrap.addEventListener('click', e => {
+  if (!correctMode) return;
+  const container = e.target.closest('.page-container');
+  if (!container) return;
+  const canvas = container.querySelector('canvas');
+  if (!canvas) return;
+  const pg = parseInt(canvas.dataset.page);
+  if (!noteCache[pg]?.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const clickX = (e.clientX - rect.left) / rect.width * canvas.width;
+  const clickY = (e.clientY - rect.top) / rect.height * canvas.height;
+  // Find closest note by pitch text position (left of the box)
+  const fontSize = Math.round(33 * dpr);
+  const hitRadius = fontSize * 1.2;
+  let closestIdx = -1, closestDist = Infinity;
+  for (let i = 0; i < noteCache[pg].length; i++) {
+    const n = noteCache[pg][i];
+    // Pitch text is drawn at (n.cx - half - 6*dpr, n.cy)
+    const half = n.size / 2;
+    const textCx = n.cx - half - fontSize / 2;
+    const textCy = n.cy;
+    const dist = Math.hypot(textCx - clickX, textCy - clickY);
+    if (dist < hitRadius && dist < closestDist) {
+      closestDist = dist;
+      closestIdx = i;
+    }
+  }
+  if (closestIdx >= 0) {
+    noteCache[pg].splice(closestIdx, 1);
+    restoreCanvas(canvas);
+    if (noteCache[pg].length) drawNotesOnCanvas(canvas, noteCache[pg]);
+    updateMarkUI();
+  }
+});
+
+// ─── Rectangular drawing ───
+let drawing=false, startX=0, startY=0, drawRect=null, activeLayer=null, activePage=0, activeCanvas=null;
+
+function startDraw(clientX, clientY, target) {
+  const layer = target.closest('.highlight-layer'); if (!layer) return;
+  const container = layer.closest('.page-container');
+  activeCanvas = container.querySelector('canvas');
+  activePage = parseInt(activeCanvas.dataset.page);
+  activeLayer = layer;
+  const lr = layer.getBoundingClientRect();
+  startX = clientX - lr.left;
+  startY = clientY - lr.top;
+  drawing = true;
+  drawRect = document.createElement('div'); drawRect.className = 'drawing-rect';
+  drawRect.style.left=startX+'px'; drawRect.style.top=startY+'px';
+  drawRect.style.width='0'; drawRect.style.height='0';
+  layer.appendChild(drawRect);
+}
+function moveDraw(clientX, clientY) {
+  if (!drawing||!drawRect) return;
+  const lr = activeLayer.getBoundingClientRect();
+  const cw = activeCanvas.offsetWidth, ch = activeCanvas.offsetHeight;
+  const curX = Math.max(0, Math.min(clientX-lr.left, cw));
+  const curY = Math.max(0, Math.min(clientY-lr.top, ch));
+  drawRect.style.left = Math.min(startX,curX)+'px';
+  drawRect.style.top = Math.min(startY,curY)+'px';
+  drawRect.style.width = Math.abs(curX-startX)+'px';
+  drawRect.style.height = Math.abs(curY-startY)+'px';
+}
+function endDraw(clientX, clientY) {
+  if (!drawing) return; drawing=false;
+  if (drawRect) { drawRect.remove(); drawRect=null; }
+  if (!activeCanvas) return;
+  const lr = activeLayer.getBoundingClientRect();
+  const cw = activeCanvas.offsetWidth, ch = activeCanvas.offsetHeight;
+  const curX = Math.max(0, Math.min(clientX-lr.left, cw));
+  const curY = Math.max(0, Math.min(clientY-lr.top, ch));
+  const left = Math.min(startX,curX), top = Math.min(startY,curY);
+  const width = Math.abs(curX-startX), height = Math.abs(curY-startY);
+  if (width<5 && height<5) return;
+  
+  if (calibrateMode) {
+    // Send calibration request
+    const mark = { x: left/cw, y: top/ch, w: width/cw, h: height/ch };
+    calibrateRegion(activePage, mark, activeCanvas);
+    return;
+  }
+  
+  const mark = { x: left/cw, y: top/ch, w: width/cw, h: height/ch, clef: markMode, doMode: doMode, doKey: doMode === 'movable' ? doKey : 1 };
+  if (!highlights[activePage]) highlights[activePage]=[];
+  highlights[activePage].push(mark);
+  drawHighlights(activeLayer.closest('.page-container'), activePage, activeCanvas);
+  updateMarkUI();
+  const container = activeLayer.closest('.page-container');
+  const idx = highlights[activePage].length - 1;
+  detectSingleRegion(container, activePage, idx, activeCanvas);
+}
+
+// Mouse events
+wrap.addEventListener('mousedown', e => {
+  if (!markMode && !calibrateMode) return;
+  if (e.target.closest('.delete-btn') || e.target.closest('.refresh-btn')) return;
+  e.preventDefault();
+  startDraw(e.clientX, e.clientY, e.target);
+});
+document.addEventListener('mousemove', e => { moveDraw(e.clientX, e.clientY); });
+document.addEventListener('mouseup', e => { endDraw(e.clientX, e.clientY); });
+
+// Touch events (iPad/Apple Pencil)
+wrap.addEventListener('touchstart', e => {
+  if (!markMode && !calibrateMode) return;
+  if (e.touches.length !== 1) return;
+  const t = e.touches[0];
+  const el = document.elementFromPoint(t.clientX, t.clientY);
+  if (el?.closest('.delete-btn') || el?.closest('.refresh-btn')) return;
+  e.preventDefault();
+  startDraw(t.clientX, t.clientY, el);
+}, { passive: false });
+document.addEventListener('touchmove', e => {
+  if (!drawing) return;
+  e.preventDefault();
+  const t = e.touches[0];
+  moveDraw(t.clientX, t.clientY);
+}, { passive: false });
+document.addEventListener('touchend', e => {
+  if (!drawing) return;
+  const t = e.changedTouches[0];
+  endDraw(t.clientX, t.clientY);
+});
+
+fileInput.addEventListener('change', e => {
+  const file=e.target.files[0]; if(!file)return;
+  const reader=new FileReader();
+  reader.onload=()=>loadPDF({data:new Uint8Array(reader.result)});
+  reader.readAsArrayBuffer(file);
+});
+dropZone.addEventListener('click', ()=>fileInput.click());
+dropZone.addEventListener('dragover', e=>{e.preventDefault();dropZone.classList.add('drag-over');});
+dropZone.addEventListener('dragleave', ()=>dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e=>{
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  const file=e.dataTransfer.files[0];
+  if(file?.type==='application/pdf'){
+    const reader=new FileReader();
+    reader.onload=()=>{ originalPdfArrayBuffer = reader.result; loadPDF({data:new Uint8Array(reader.result)}); }
+    reader.readAsArrayBuffer(file);
+  }
+});
+btnExport.addEventListener('click', async () => {
+  if (!pdfDoc) return;
+  loading.style.display = 'flex';
+  try {
+    const { PDFDocument } = PDFLib;
+    const newPdf = await PDFDocument.create();
+    const scale = getSeamlessFitScale((await pdfDoc.getPage(1)).getViewport({scale:1}));
+    for (let i = 1; i <= pdfDoc.numPages; i++) {
+      const page = await pdfDoc.getPage(i);
+      const viewport = page.getViewport({ scale: scale * dpr });
+      const [cssW, cssH] = fitCanvasSize(viewport.width, viewport.height);
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = viewport.width;
+      offCanvas.height = viewport.height;
+      const ctx = offCanvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      if (noteCache[i]?.length) {
+        const fontSize = Math.round(33 * dpr);
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'right';
+        for (const n of noteCache[i]) {
+          const half = n.size / 2;
+          const isBass = n.clef === 'bass';
+          ctx.strokeStyle = isBass ? 'rgba(233,69,96,0.85)' : 'rgba(74,144,217,0.85)';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(n.cx - half, n.cy - half, n.size, n.size);
+          if (n.pitch) {
+            ctx.fillStyle = isBass ? 'rgba(233,69,96,0.95)' : 'rgba(74,144,217,0.95)';
+            ctx.fillText(n.pitch, n.cx - half - 6, n.cy);
+          }
+        }
+      }
+      const jpgData = offCanvas.toDataURL('image/jpeg', 0.92);
+      const jpgBytes = Uint8Array.from(atob(jpgData.split(',')[1]), c => c.charCodeAt(0));
+      const img = await newPdf.embedJpg(jpgBytes);
+      const p = newPdf.addPage([cssW, cssH]);
+      p.drawImage(img, { x: 0, y: 0, width: cssW, height: cssH });
+    }
+    const pdfBytes = await newPdf.save();
+    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'annotated.pdf'; a.click();
+    URL.revokeObjectURL(url);
+  } catch(e) { console.error('Export failed:', e); alert('导出失败: ' + e.message); }
+  loading.style.display = 'none';
+});
+let resizeTimer;
+window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>render(),150);});
+</script>
+</body>
+</html>
