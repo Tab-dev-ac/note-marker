@@ -121,6 +121,84 @@ const pageInfo=$('page-info'), loading=$('loading');
 const btnBass=$('btn-bass'), btnTreble=$('btn-treble'), btnClear=$('btn-clear-marks');
 const btnDebug=$('btn-debug'), btnExport=$('btn-export'), btnCorrect=$('btn-correct'), btnCalibrate=$('btn-calibrate'), markTip=$('mark-tip');
 const doSwitch=$('do-switch'), keySelect=$('key-select'), modeLabel=$('mode-label');
+const SESSION_KEY = 'noteMarkerSessionId';
+const clientSessionId = localStorage.getItem(SESSION_KEY) || createClientSessionId();
+
+localStorage.setItem(SESSION_KEY, clientSessionId);
+
+function createClientSessionId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `nm-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function roundForLog(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.round(value * 1000) / 1000
+    : value;
+}
+
+function sanitizeLogValue(value, depth = 0) {
+  if (depth >= 4) return '[max-depth]';
+  if (Array.isArray(value)) {
+    const items = value.slice(0, 25).map(v => sanitizeLogValue(v, depth + 1));
+    if (value.length > 25) items.push(`...(${value.length - 25} more)`);
+    return items;
+  }
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value).slice(0, 25);
+    const out = {};
+    for (const [k, v] of entries) out[k] = sanitizeLogValue(v, depth + 1);
+    if (Object.keys(value).length > 25) out._truncated = Object.keys(value).length - 25;
+    return out;
+  }
+  if (typeof value === 'number') return roundForLog(value);
+  if (typeof value === 'string') return value.length > 300 ? value.slice(0, 300) + '...' : value;
+  return value;
+}
+
+function summarizeMarkForLog(mark, extra = {}) {
+  if (!mark) return sanitizeLogValue(extra);
+  return sanitizeLogValue({
+    ...extra,
+    x: roundForLog(mark.x),
+    y: roundForLog(mark.y),
+    w: roundForLog(mark.w),
+    h: roundForLog(mark.h),
+    clef: mark.clef,
+    detected: !!mark.detected,
+  });
+}
+
+function summarizeNotesForLog(notes) {
+  const list = notes || [];
+  return sanitizeLogValue({
+    count: list.length,
+    pitches: list.map(n => n.pitch).filter(Boolean).slice(0, 20),
+  });
+}
+
+function apiHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    'X-Session-Id': clientSessionId,
+  };
+}
+
+function logEvent(event, payload = {}, level = 'info') {
+  const body = {
+    event,
+    level,
+    sessionId: clientSessionId,
+    clientTs: new Date().toISOString(),
+    payload: sanitizeLogValue(payload),
+  };
+  fetch(SERVER + '/log/client', {
+    method: 'POST',
+    headers: apiHeaders(),
+    body: JSON.stringify(body),
+    keepalive: true,
+  }).catch(() => {});
+}
 
 function show(v) { dropZone.style.display=v?'none':'flex'; wrap.style.display=v?'flex':'none'; }
 function updateModeUI() {
@@ -166,7 +244,9 @@ function drawNotesOnCanvas(canvas, notes) {
   ctx.font = `bold ${fontSize}px sans-serif`;
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'right';
-  for (const n of notes) {
+  const layouts = getNoteLabelLayouts(notes, fontSize);
+  for (const layout of layouts) {
+    const n = layout.note;
     const half = n.size / 2;
     const isBass = n.clef === 'bass';
     ctx.strokeStyle = isBass ? 'rgba(233,69,96,0.85)' : 'rgba(74,144,217,0.85)';
@@ -174,9 +254,49 @@ function drawNotesOnCanvas(canvas, notes) {
     ctx.strokeRect(n.cx - half, n.cy - half, n.size, n.size);
     if (n.pitch) {
       ctx.fillStyle = isBass ? 'rgba(233,69,96,0.95)' : 'rgba(74,144,217,0.95)';
-      ctx.fillText(n.pitch, n.cx - half - 6, n.cy);
+      ctx.fillText(n.pitch, layout.x, layout.y);
     }
   }
+}
+
+function getNoteLabelLayouts(notes, fontSize) {
+  const layouts = (notes || []).map((note, index) => {
+    const half = note.size / 2;
+    return {
+      note,
+      index,
+      baseX: note.cx - half - 6,
+      baseY: note.cy,
+      x: note.cx - half - 6,
+      y: note.cy,
+    };
+  });
+
+  const groups = [];
+  const xThreshold = fontSize * 1.15;
+  const yThreshold = fontSize * 1.05;
+  for (const layout of [...layouts].sort((a, b) => a.baseX - b.baseX || a.baseY - b.baseY)) {
+    let group = groups.find(items =>
+      items.some(item => Math.abs(item.baseX - layout.baseX) < xThreshold && Math.abs(item.baseY - layout.baseY) < yThreshold)
+    );
+    if (!group) {
+      group = [];
+      groups.push(group);
+    }
+    group.push(layout);
+  }
+
+  for (const group of groups) {
+    if (group.length < 2) continue;
+    group.sort((a, b) => a.baseY - b.baseY || a.baseX - b.baseX);
+    const step = fontSize * 0.75;
+    const center = (group.length - 1) / 2;
+    group.forEach((layout, idx) => {
+      layout.y = layout.baseY + (idx - center) * step;
+    });
+  }
+
+  return layouts;
 }
 
 function restoreCanvas(canvas) {
@@ -213,6 +333,11 @@ function drawHighlights(container, pageNum, canvasEl) {
     del.textContent = '✕';
     del.addEventListener('click', ev => {
       ev.stopPropagation();
+      const removedNoteCount = (noteCache[pageNum] || []).filter(n => {
+        const nx = n.cx / parseFloat(canvasEl.dataset.origW || canvasEl.width);
+        const ny = n.cy / parseFloat(canvasEl.dataset.origH || canvasEl.height);
+        return nx >= m.x && nx <= m.x + m.w && ny >= m.y && ny <= m.y + m.h;
+      }).length;
       highlights[pageNum].splice(idx, 1);
       if (!highlights[pageNum].length) delete highlights[pageNum];
       // Only clear notes that belong to the deleted region
@@ -227,6 +352,12 @@ function drawHighlights(container, pageNum, canvasEl) {
       restoreCanvas(canvasEl);
       drawHighlights(container, pageNum, canvasEl);
       if (noteCache[pageNum]?.length) drawNotesOnCanvas(canvasEl, noteCache[pageNum]);
+      logEvent('region_deleted', {
+        page: pageNum,
+        markIdx: idx,
+        removedNoteCount,
+        region: summarizeMarkForLog(m, { page: pageNum }),
+      });
       updateMarkUI();
     });
     r.appendChild(del);
@@ -238,6 +369,10 @@ async function detectSingleRegion(container, pg, markIdx, canvasEl) {
   if (!pdfDoc) return;
   const mark = highlights[pg][markIdx];
   if (!mark) return;
+  const started = performance.now();
+  const detectContext = { page: pg, markIdx, mark: summarizeMarkForLog(mark, { page: pg }) };
+  let detected = false;
+  logEvent('detect_region_started', detectContext);
   restoreCanvas(canvasEl);
   // Remove old notes for this region
   if (noteCache[pg]) {
@@ -252,15 +387,30 @@ async function detectSingleRegion(container, pg, markIdx, canvasEl) {
   try {
     const resp = await fetch(SERVER + '/detect', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: apiHeaders(),
       body: JSON.stringify({ image: imageB64, regions: [{ ...mark, doMode: doMode, doKey: doMode === 'movable' ? doKey : 1 }], calibration: calibration })
     });
     const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     const newNotes = (data.notes || []).map(n => ({...n, regionIdx: markIdx}));
     if (!noteCache[pg]) noteCache[pg] = [];
     noteCache[pg].push(...newNotes);
-  } catch (e) { console.error('Detection failed:', e); }
-  mark.detected = true;
+    detected = true;
+    logEvent('detect_region_completed', {
+      ...detectContext,
+      requestId: data.requestId,
+      durationMs: performance.now() - started,
+      notes: summarizeNotesForLog(newNotes),
+    });
+  } catch (e) {
+    logEvent('detect_region_failed', {
+      ...detectContext,
+      durationMs: performance.now() - started,
+      error: e.message,
+    }, 'error');
+    console.error('Detection failed:', e);
+  }
+  mark.detected = detected;
   if (noteCache[pg]?.length) drawNotesOnCanvas(canvasEl, noteCache[pg]);
   drawHighlights(container, pg, canvasEl);
   updateMarkUI();
@@ -268,12 +418,15 @@ async function detectSingleRegion(container, pg, markIdx, canvasEl) {
 
 async function calibrateRegion(pg, mark, canvasEl) {
   if (!pdfDoc) return;
+  const started = performance.now();
+  const calibrateContext = { page: pg, region: summarizeMarkForLog(mark, { page: pg }) };
+  logEvent('calibration_started', calibrateContext);
   const dataUrl = canvasEl.toDataURL('image/png');
   const imageB64 = dataUrl.split(',')[1];
   try {
     const resp = await fetch(SERVER + '/calibrate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: apiHeaders(),
       body: JSON.stringify({ image: imageB64, region: mark })
     });
     const data = await resp.json();
@@ -281,12 +434,34 @@ async function calibrateRegion(pg, mark, canvasEl) {
       calibration = { staffSpace: data.staff_space, lineGap: data.line_gap };
       localStorage.setItem('calibration', JSON.stringify(calibration));
       calibrateMode = false;
+      logEvent('calibration_completed', {
+        ...calibrateContext,
+        requestId: data.requestId,
+        staffSpace: data.staff_space,
+        lineGap: data.line_gap,
+        durationMs: performance.now() - started,
+      });
+      await redetectExistingHighlights('calibration_updated');
       updateMarkUI();
       alert('校准成功！五线谱间距: ' + data.line_gap.toFixed(1) + 'px');
     } else {
+      logEvent('calibration_failed', {
+        ...calibrateContext,
+        requestId: data.requestId,
+        error: data.error || '未检测到五线谱',
+        durationMs: performance.now() - started,
+      }, 'warning');
       alert('校准失败: ' + (data.error || '未检测到五线谱'));
     }
-  } catch (e) { console.error('Calibration failed:', e); alert('校准失败: ' + e.message); }
+  } catch (e) {
+    logEvent('calibration_failed', {
+      ...calibrateContext,
+      durationMs: performance.now() - started,
+      error: e.message,
+    }, 'error');
+    console.error('Calibration failed:', e);
+    alert('校准失败: ' + e.message);
+  }
 }
 
 async function detectAllNotes() {
@@ -314,20 +489,51 @@ async function detectAllNotes() {
     }
     const dataUrl = canvas.toDataURL('image/png');
     const imageB64 = dataUrl.split(',')[1];
+    const started = performance.now();
+    const pageContext = { page: pg, undetectedCount: undetected.length };
     try {
       const resp = await fetch(SERVER + '/detect', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders(),
         body: JSON.stringify({ image: imageB64, regions: undetected.map(m => ({ ...m, doMode: doMode, doKey: doMode === 'movable' ? doKey : 1 })), calibration: calibration })
       });
       const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
       if (!noteCache[pg]) noteCache[pg] = [];
       noteCache[pg].push(...(data.notes || []));
-    } catch (e) { console.error('Detection failed:', e); }
-    // Mark all undetected as detected
-    for (const m of marks) { if (!m.detected) m.detected = true; }
+      for (const m of undetected) m.detected = true;
+      logEvent('detect_page_batch_completed', {
+        ...pageContext,
+        requestId: data.requestId,
+        durationMs: performance.now() - started,
+        notes: summarizeNotesForLog(data.notes || []),
+      });
+    } catch (e) {
+      logEvent('detect_page_batch_failed', {
+        ...pageContext,
+        durationMs: performance.now() - started,
+        error: e.message,
+      }, 'error');
+      console.error('Detection failed:', e);
+    }
     if (noteCache[pg]?.length) drawNotesOnCanvas(canvas, noteCache[pg]);
     drawHighlights(container, pg, canvas);
+  }
+}
+
+async function redetectExistingHighlights(reason = 'manual') {
+  if (!pdfDoc) return;
+  const pages = Object.keys(highlights).filter(k => highlights[k]?.length);
+  if (!pages.length) return;
+  const markCount = pages.reduce((sum, pg) => sum + (highlights[pg]?.length || 0), 0);
+  logEvent('redetect_started', { reason, pageCount: pages.length, markCount });
+  pages.forEach(pg => highlights[pg].forEach(mark => { mark.detected = false; }));
+  loading.style.display = 'flex';
+  try {
+    await detectAllNotes();
+    logEvent('redetect_completed', { reason, pageCount: pages.length, markCount });
+  } finally {
+    loading.style.display = 'none';
   }
 }
 
@@ -358,12 +564,28 @@ async function renderSeamless() {
 
 function render() { if (!pdfDoc) return; renderSeamless(); }
 
-async function loadPDF(data) {
-  pdfDoc = await pdfjsLib.getDocument(data).promise;
-  Object.keys(highlights).forEach(k=>delete highlights[k]);
-  Object.keys(noteCache).forEach(k=>delete noteCache[k]);
-  Object.keys(pageImageData).forEach(k=>delete pageImageData[k]);
-  show(true); updateModeUI(); await renderSeamless();
+async function loadPDF(data, loadMeta = {}) {
+  const started = performance.now();
+  try {
+    pdfDoc = await pdfjsLib.getDocument(data).promise;
+    Object.keys(highlights).forEach(k=>delete highlights[k]);
+    Object.keys(noteCache).forEach(k=>delete noteCache[k]);
+    Object.keys(pageImageData).forEach(k=>delete pageImageData[k]);
+    show(true); updateModeUI(); await renderSeamless();
+    logEvent('pdf_loaded', {
+      ...loadMeta,
+      numPages: pdfDoc.numPages,
+      hasCalibration: !!calibration,
+      durationMs: performance.now() - started,
+    });
+  } catch (e) {
+    logEvent('pdf_load_failed', {
+      ...loadMeta,
+      durationMs: performance.now() - started,
+      error: e.message,
+    }, 'error');
+    throw e;
+  }
 }
 
 // ─── Do mode switch ───
@@ -373,32 +595,63 @@ function initDoMode() {
   keySelect.value = doKey;
 }
 initDoMode();
-doSwitch.addEventListener('click', () => {
+logEvent('client_session_started', {
+  url: window.location.href,
+  userAgent: navigator.userAgent,
+  devicePixelRatio: dpr,
+  doMode,
+  doKey,
+  hasCalibration: !!calibration,
+});
+window.addEventListener('error', e => {
+  logEvent('window_error', {
+    message: e.message,
+    source: e.filename,
+    line: e.lineno,
+    column: e.colno,
+  }, 'error');
+});
+window.addEventListener('unhandledrejection', e => {
+  const reason = e.reason?.message || String(e.reason);
+  logEvent('window_unhandled_rejection', { reason }, 'error');
+});
+doSwitch.addEventListener('click', async () => {
+  const previous = doMode;
   doMode = doMode === 'fixed' ? 'movable' : 'fixed';
   localStorage.setItem('doMode', doMode);
   initDoMode();
+  logEvent('do_mode_changed', { previous, current: doMode, doKey });
+  await redetectExistingHighlights('do_mode_changed');
 });
-keySelect.addEventListener('change', () => {
+keySelect.addEventListener('change', async () => {
+  const previous = doKey;
   doKey = parseInt(keySelect.value);
   localStorage.setItem('doKey', doKey);
+  logEvent('do_key_changed', { previous, current: doKey, doMode });
+  await redetectExistingHighlights('do_key_changed');
 });
 
 btnBass.addEventListener('click', () => {
   markMode = markMode === 'bass' ? null : 'bass';
   if (markMode) { correctMode = false; calibrateMode = false; }
+  logEvent('mark_mode_toggled', { mode: 'bass', active: markMode === 'bass' });
   updateMarkUI();
 });
 btnTreble.addEventListener('click', () => {
   markMode = markMode === 'treble' ? null : 'treble';
   if (markMode) { correctMode = false; calibrateMode = false; }
+  logEvent('mark_mode_toggled', { mode: 'treble', active: markMode === 'treble' });
   updateMarkUI();
 });
 btnCalibrate.addEventListener('click', () => {
   calibrateMode = !calibrateMode;
   if (calibrateMode) { markMode = null; correctMode = false; }
+  logEvent('calibrate_mode_toggled', { active: calibrateMode });
   updateMarkUI();
 });
 btnClear.addEventListener('click', () => {
+  const markCount = Object.values(highlights).reduce((sum, arr) => sum + (arr?.length || 0), 0);
+  const noteCount = Object.values(noteCache).reduce((sum, arr) => sum + (arr?.length || 0), 0);
   Object.keys(highlights).forEach(k=>delete highlights[k]);
   Object.keys(noteCache).forEach(k=>delete noteCache[k]);
   wrap.querySelectorAll('.page-container canvas').forEach(c => restoreCanvas(c));
@@ -406,6 +659,7 @@ btnClear.addEventListener('click', () => {
     const canvas = c.querySelector('canvas');
     if (canvas) drawHighlights(c, parseInt(canvas.dataset.page), canvas);
   });
+  logEvent('annotations_cleared', { markCount, noteCount });
   updateMarkUI();
 });
 btnDebug.addEventListener('click', async () => {
@@ -421,26 +675,57 @@ btnDebug.addEventListener('click', async () => {
   const pg = parseInt(canvas.dataset.page);
   const marks = highlights[pg] || [];
   if (!marks.length) return;
+  const started = performance.now();
   restoreCanvas(canvas);
   const imageB64 = canvas.toDataURL('image/png').split(',')[1];
   try {
     const resp = await fetch(SERVER+'/debug', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: apiHeaders(),
       body: JSON.stringify({image: imageB64, regions: marks.map(m => ({ ...m, doMode: doMode, doKey: doMode === 'movable' ? doKey : 1 })), calibration: calibration})
     });
+    if (!resp.ok) {
+      let message = `HTTP ${resp.status}`;
+      try {
+        const err = await resp.json();
+        message = err.error || message;
+      } catch {}
+      throw new Error(message);
+    }
     const blob = await resp.blob();
     window.open(URL.createObjectURL(blob), '_blank');
-  } catch(e) { console.error(e); }
+    logEvent('debug_image_opened', {
+      page: pg,
+      markCount: marks.length,
+      durationMs: performance.now() - started,
+      imageBytes: blob.size,
+    });
+  } catch(e) {
+    logEvent('debug_image_failed', {
+      page: pg,
+      markCount: marks.length,
+      durationMs: performance.now() - started,
+      error: e.message,
+    }, 'error');
+    console.error(e);
+  }
 });
 document.addEventListener('keydown', e => {
   if (e.key==='Escape') {
+    const hadMarkMode = !!markMode;
+    const hadCorrectMode = !!correctMode;
     if (markMode) { markMode=null; updateMarkUI(); }
     if (correctMode) { correctMode=false; updateMarkUI(); }
+    logEvent('escape_pressed', { clearedMarkMode: hadMarkMode, clearedCorrectMode: hadCorrectMode });
   }
 });
 
 // ─── Correct mode: click to remove individual note ───
-btnCorrect.addEventListener('click', () => { correctMode=!correctMode; if(correctMode){ markMode=null; calibrateMode=false; } updateMarkUI(); });
+btnCorrect.addEventListener('click', () => {
+  correctMode=!correctMode;
+  if(correctMode){ markMode=null; calibrateMode=false; }
+  logEvent('correct_mode_toggled', { active: correctMode });
+  updateMarkUI();
+});
 wrap.addEventListener('click', e => {
   if (!correctMode) return;
   const container = e.target.closest('.page-container');
@@ -455,23 +740,29 @@ wrap.addEventListener('click', e => {
   // Find closest note by pitch text position (left of the box)
   const fontSize = Math.round(33 * dpr);
   const hitRadius = fontSize * 1.2;
+  const labelLayouts = getNoteLabelLayouts(noteCache[pg], fontSize);
   let closestIdx = -1, closestDist = Infinity;
-  for (let i = 0; i < noteCache[pg].length; i++) {
-    const n = noteCache[pg][i];
-    // Pitch text is drawn at (n.cx - half - 6*dpr, n.cy)
-    const half = n.size / 2;
-    const textCx = n.cx - half - fontSize / 2;
-    const textCy = n.cy;
+  for (const layout of labelLayouts) {
+    const textCx = layout.x - fontSize / 2;
+    const textCy = layout.y;
     const dist = Math.hypot(textCx - clickX, textCy - clickY);
     if (dist < hitRadius && dist < closestDist) {
       closestDist = dist;
-      closestIdx = i;
+      closestIdx = layout.index;
     }
   }
   if (closestIdx >= 0) {
+    const removed = noteCache[pg][closestIdx];
     noteCache[pg].splice(closestIdx, 1);
     restoreCanvas(canvas);
     if (noteCache[pg].length) drawNotesOnCanvas(canvas, noteCache[pg]);
+    logEvent('note_deleted', {
+      page: pg,
+      pitch: removed?.pitch,
+      cx: roundForLog(removed?.cx),
+      cy: roundForLog(removed?.cy),
+      remainingNotes: noteCache[pg].length,
+    });
     updateMarkUI();
   }
 });
@@ -516,6 +807,15 @@ function endDraw(clientX, clientY) {
   const left = Math.min(startX,curX), top = Math.min(startY,curY);
   const width = Math.abs(curX-startX), height = Math.abs(curY-startY);
   if (width<5 && height<5) return;
+  const markForLog = {
+    x: left/cw, y: top/ch, w: width/cw, h: height/ch,
+    clef: markMode || (calibrateMode ? 'calibration' : null),
+  };
+  logEvent('region_drawn', {
+    page: activePage,
+    mode: calibrateMode ? 'calibration' : markMode,
+    region: summarizeMarkForLog(markForLog, { page: activePage }),
+  });
   
   if (calibrateMode) {
     // Send calibration request
@@ -569,7 +869,10 @@ document.addEventListener('touchend', e => {
 fileInput.addEventListener('change', e => {
   const file=e.target.files[0]; if(!file)return;
   const reader=new FileReader();
-  reader.onload=()=>loadPDF({data:new Uint8Array(reader.result)});
+  reader.onload=()=>loadPDF(
+    {data:new Uint8Array(reader.result)},
+    {source: 'file_input', fileName: file.name, fileSize: file.size, fileType: file.type}
+  );
   reader.readAsArrayBuffer(file);
 });
 dropZone.addEventListener('click', ()=>fileInput.click());
@@ -580,13 +883,19 @@ dropZone.addEventListener('drop', e=>{
   const file=e.dataTransfer.files[0];
   if(file?.type==='application/pdf'){
     const reader=new FileReader();
-    reader.onload=()=>{ originalPdfArrayBuffer = reader.result; loadPDF({data:new Uint8Array(reader.result)}); }
+    reader.onload=()=>{ originalPdfArrayBuffer = reader.result; loadPDF(
+      {data:new Uint8Array(reader.result)},
+      {source: 'drag_drop', fileName: file.name, fileSize: file.size, fileType: file.type}
+    ); }
     reader.readAsArrayBuffer(file);
+  } else if (file) {
+    logEvent('invalid_file_dropped', { fileName: file.name, fileType: file.type || 'unknown', fileSize: file.size }, 'warning');
   }
 });
 btnExport.addEventListener('click', async () => {
   if (!pdfDoc) return;
   loading.style.display = 'flex';
+  const started = performance.now();
   try {
     const { PDFDocument } = PDFLib;
     const newPdf = await PDFDocument.create();
@@ -605,7 +914,9 @@ btnExport.addEventListener('click', async () => {
         ctx.font = `bold ${fontSize}px sans-serif`;
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'right';
-        for (const n of noteCache[i]) {
+        const layouts = getNoteLabelLayouts(noteCache[i], fontSize);
+        for (const layout of layouts) {
+          const n = layout.note;
           const half = n.size / 2;
           const isBass = n.clef === 'bass';
           ctx.strokeStyle = isBass ? 'rgba(233,69,96,0.85)' : 'rgba(74,144,217,0.85)';
@@ -613,7 +924,7 @@ btnExport.addEventListener('click', async () => {
           ctx.strokeRect(n.cx - half, n.cy - half, n.size, n.size);
           if (n.pitch) {
             ctx.fillStyle = isBass ? 'rgba(233,69,96,0.95)' : 'rgba(74,144,217,0.95)';
-            ctx.fillText(n.pitch, n.cx - half - 6, n.cy);
+            ctx.fillText(n.pitch, layout.x, layout.y);
           }
         }
       }
@@ -629,7 +940,19 @@ btnExport.addEventListener('click', async () => {
     const a = document.createElement('a');
     a.href = url; a.download = 'annotated.pdf'; a.click();
     URL.revokeObjectURL(url);
-  } catch(e) { console.error('Export failed:', e); alert('导出失败: ' + e.message); }
+    logEvent('pdf_exported', {
+      pageCount: pdfDoc.numPages,
+      noteCount: Object.values(noteCache).reduce((sum, arr) => sum + (arr?.length || 0), 0),
+      bytes: blob.size,
+      durationMs: performance.now() - started,
+    });
+  } catch(e) {
+    logEvent('pdf_export_failed', {
+      durationMs: performance.now() - started,
+      error: e.message,
+    }, 'error');
+    console.error('Export failed:', e); alert('导出失败: ' + e.message);
+  }
   loading.style.display = 'none';
 });
 let resizeTimer;
